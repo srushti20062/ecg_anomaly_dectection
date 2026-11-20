@@ -1,3 +1,5 @@
+import io
+import wave
 import streamlit as st
 import wfdb
 import neurokit2 as nk
@@ -29,7 +31,41 @@ COLOR_MAP = {
     'Right Bundle Branch Block (RBBB)': '#8c564b'
 }
 
-# Helper 1: Extract features from MIT-BIH ground-truth annotations
+def generate_ecg_audio(r_peaks, y_pred, total_samples, ecg_fs=360, audio_fs=22050):
+    duration_sec = total_samples / ecg_fs
+    n_audio_samples = int(duration_sec * audio_fs)
+    audio = np.zeros(n_audio_samples, dtype=np.float32)
+
+    for pk, label in zip(r_peaks, y_pred):
+        t_sec = pk / ecg_fs
+        start_idx = int(t_sec * audio_fs)
+
+        if label == 'Normal Beat (N)':
+            beep_len = int(0.07 * audio_fs)
+            t = np.linspace(0, 0.07, beep_len, endpoint=False)
+            envelope = np.sin(np.pi * t / 0.07)
+            tone = 0.45 * envelope * np.sin(2 * np.pi * 1000 * t)
+        else:
+            beep_len = int(0.18 * audio_fs)
+            t = np.linspace(0, 0.18, beep_len, endpoint=False)
+            pulse = np.where((t < 0.07) | (t > 0.11), 1.0, 0.0)
+            tone = 0.75 * pulse * np.sin(2 * np.pi * 600 * t)
+
+        end_idx = min(start_idx + len(tone), n_audio_samples)
+        if start_idx < n_audio_samples:
+            audio[start_idx:end_idx] += tone[:end_idx - start_idx]
+
+    audio = np.clip(audio, -1.0, 1.0)
+    pcm_data = (audio * 32767).astype(np.int16)
+
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(audio_fs)
+        wf.writeframes(pcm_data.tobytes())
+    return buf.getvalue()
+
 def extract_mitbih_features(record_id, max_samples=None):
     fs = 360
     rec = wfdb.rdrecord(record_id, pn_dir='mitdb', sampto=max_samples)
@@ -60,7 +96,6 @@ def extract_mitbih_features(record_id, max_samples=None):
 
     return cleaned_ecg, fs, np.array(valid_peaks), np.array(features), np.array(labels)
 
-# Helper 2: Extract features from ANY raw 1D signal (Offline CSV & Digitized Images)
 def analyze_custom_signal(raw_signal, fs=360):
     cleaned_ecg = nk.ecg_clean(raw_signal, sampling_rate=fs)
     _, info = nk.ecg_peaks(cleaned_ecg, sampling_rate=fs)
@@ -83,7 +118,6 @@ def analyze_custom_signal(raw_signal, fs=360):
 
     return cleaned_ecg, np.array(valid_peaks), np.array(features)
 
-# Helper 3: Digitize an uploaded ECG Graph Image into a 1D ECG signal
 def digitize_ecg_image(uploaded_img, duration_sec=10, target_fs=360):
     img = Image.open(uploaded_img).convert("L")
     img_arr = np.array(img, dtype=float)
@@ -107,7 +141,6 @@ def digitize_ecg_image(uploaded_img, duration_sec=10, target_fs=360):
     resampled_signal = np.interp(x_new, x_old, raw_wave)
     return resampled_signal
 
-# Train Random Forest Classifier (cached in memory)
 @st.cache_resource
 def train_arrhythmia_model():
     train_records = ["100", "106", "118", "119", "200", "208"]
@@ -132,7 +165,6 @@ def train_arrhythmia_model():
 with st.spinner("Loading Arrhythmia Classification Model..."):
     model, model_acc, y_test, y_test_pred = train_arrhythmia_model()
 
-# Sidebar: Input Source Selector
 st.sidebar.header("1. Choose ECG Input Source")
 input_mode = st.sidebar.radio(
     "Select Data Source:",
@@ -155,7 +187,6 @@ st.sidebar.download_button(
     help="Save this CSV before your demo so you have an offline test file ready!"
 )
 
-# Tabs
 tab1, tab2 = st.tabs(["🩺 Live ECG Monitor", "📊 Model Evaluation (Report & Viva)"])
 
 with tab1:
@@ -163,7 +194,6 @@ with tab1:
     cleaned_ecg, r_peaks, X_patient, y_true = None, None, None, None
     data_ready = False
 
-    # MODE 1: Online MIT-BIH Dataset
     if input_mode == "🌐 MIT-BIH Online Dataset":
         st.sidebar.subheader("MIT-BIH Settings")
         selected_record = st.sidebar.selectbox(
@@ -175,7 +205,6 @@ with tab1:
         )
         data_ready = True
 
-    # MODE 2: Offline CSV File Upload
     elif input_mode == "📄 Offline CSV File Upload":
         st.sidebar.subheader("CSV Upload Settings")
         uploaded_csv = st.sidebar.file_uploader("Upload ECG CSV File:", type=["csv"])
@@ -194,7 +223,6 @@ with tab1:
         else:
             st.info("👈 Upload a CSV file in the sidebar (or click **Download Sample Offline CSV** to test immediately).")
 
-    # MODE 3: ECG Graph Image Upload
     elif input_mode == "🖼️ ECG Graph Image Upload":
         st.sidebar.subheader("Image Digitizer Settings")
         uploaded_img = st.sidebar.file_uploader("Upload ECG Strip Image (PNG/JPG):", type=["png", "jpg", "jpeg"])
@@ -203,7 +231,7 @@ with tab1:
         if uploaded_img is not None:
             col_img1, col_img2 = st.columns(2)
             with col_img1:
-                st.image(uploaded_img, caption="Uploaded ECG Strip Image", use_container_width=True)
+                st.image(uploaded_img, caption="Uploaded ECG Strip Image", width='stretch')
             with col_img2:
                 st.info("Image Digitization Pipeline: Grayscale Conversion → Grid Suppression → Trace Extraction → 360 Hz Resampling → Arrhythmia Classification.")
 
@@ -213,7 +241,6 @@ with tab1:
         else:
             st.info("👈 Upload a clear photo or screenshot of an ECG waveform strip (dark trace on a light background) in the sidebar.")
 
-    # Render Dashboard Output if Data is Ready
     if data_ready and X_patient is not None and len(X_patient) > 0:
         y_pred = model.predict(X_patient)
 
@@ -225,22 +252,3 @@ with tab1:
 
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Average Heart Rate", f"{avg_hr} BPM")
-        c2.metric("Total Beat Count", f"{total_beats} beats")
-        c3.metric("Detected Arrhythmias", f"{anomaly_count} abnormal")
-        c4.metric("Classifier Accuracy", f"{model_acc * 100:.1f}%")
-
-        time_axis = np.arange(len(cleaned_ecg)) / fs
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=time_axis, y=cleaned_ecg, mode='lines',
-            name='Extracted/Filtered ECG', line=dict(color='#1f77b4', width=1.5)
-        ))
-
-        for beat_type in np.unique(y_pred):
-            idx = np.where(y_pred == beat_type)
-            is_normal = (beat_type == 'Normal Beat (N)')
-            fig.add_trace(go.Scatter(
-                x=r_peaks[idx] / fs, y=cleaned_ecg[r_peaks[idx]],
-                mode='markers', name=beat_type,
-                marker=dict(
-                    color=COLOR_MAP.get(beat_type, 'red'),
