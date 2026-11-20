@@ -1,0 +1,19 @@
+# 🫀 ECG Signal Anomaly & Arrhythmia Detection System
+
+An interactive web-based dashboard built with Python and Streamlit that processes raw ECG signals from the **PhysioNet MIT-BIH Arrhythmia Database**, extracts R-R interval and QRS morphological features, and classifies cardiac arrhythmias using a **Random Forest Classifier**.
+
+## 🚀 Features
+- **Signal Preprocessing:** Bandpass filtering and baseline wander removal via `NeuroKit2`.
+- **Feature Extraction:** Computes Pre-RR interval, Post-RR interval, R-peak amplitude, QRS peak-to-peak height, and beat energy.
+- **Multi-Class Arrhythmia Classification:** Detects Normal Beats (`N`), Premature Ventricular Contractions (`V`), Atrial Premature Beats (`A`), and Bundle Branch Blocks (`L`/`R`).
+- **Interactive Dashboard:** Zoomable Plotly ECG waveform with color-coded anomaly markers, KPI summary cards, and model evaluation metrics.
+
+## 🛠️ How to Run Locally
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+2. Launch the web dashboard:
+   ```bash
+   streamlit run app.py
+   ```
