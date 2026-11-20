@@ -13,7 +13,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 
 st.set_page_config(page_title="ECG Arrhythmia Classification", layout="wide")
-st.title("ðŸ«€ ECG Arrhythmia Detection & Classification Dashboard")
+st.title("ECG SIGNAL ANOMALY DETECTION")
 
 BEAT_CLASSES = {
     'N': 'Normal Beat (N)',
@@ -205,13 +205,13 @@ with tab1:
     data_ready = False
 
     if input_mode == "MIT-BIH Online Dataset":
-        selected_record = st.sidebar.selectbox("Select Patient Record:", ["106", "119", "200", "208", "100", "118"])
+        selected_record = st.sidebar.selectbox("Select Patient Record:", ["100","101","102","103","104","105","106","107","108","109","111","112","113","114","115","116","117","118","119","121","122","123","124","200","201","202","203","205","207","208","209","210","212","213","214","215","217","219","220","221","222","223","228","230","231","232","233","234"])
         duration_sec = st.sidebar.slider("Signal Duration (seconds):", 10, 60, 25)
         cleaned_ecg, fs, r_peaks, X_patient, y_true = extract_mitbih_features(selected_record, max_samples=duration_sec * fs)
         data_ready = True
 
-    elif input_mode == "Offline CSV File Upload":
-        uploaded_csv = st.sidebar.file_uploader("Upload ECG CSV File:", type=["csv"])
+    elif "CSV" in input_mode:
+        uploaded_csv = st.file_uploader("Upload ECG CSV File:", type=["csv"])
         fs = st.sidebar.number_input("Sampling Rate (Hz):", min_value=100, max_value=1000, value=360)
         if uploaded_csv is not None:
             df_csv = pd.read_csv(uploaded_csv)
@@ -219,6 +219,20 @@ with tab1:
             if numeric_cols:
                 ecg_col = st.sidebar.selectbox("Select ECG Signal Column:", numeric_cols)
                 cleaned_ecg, r_peaks, X_patient = analyze_custom_signal(df_csv[ecg_col].dropna().values, fs=fs)
+                data_ready = True
+        else:
+            st.info("Upload a CSV file above (or click Download Sample Offline CSV in the sidebar).")
+
+    elif "Image" in input_mode:
+        uploaded_img = st.file_uploader("Upload ECG Strip Image (PNG/JPG):", type=["png", "jpg", "jpeg"])
+        img_duration = st.sidebar.slider("Estimated Strip Duration (seconds):", 5, 30, 10)
+        if uploaded_img is not None:
+            st.image(uploaded_img, caption="Uploaded ECG Strip Image", use_container_width=True)
+            raw_sig = digitize_ecg_image(uploaded_img, duration_sec=img_duration, target_fs=fs)
+            cleaned_ecg, r_peaks, X_patient = analyze_custom_signal(raw_sig, fs=fs)
+            data_ready = True
+        else:
+            st.info("Upload a clear ECG graph image (PNG/JPG) above to digitize and detect arrhythmias.")
 
     if data_ready and X_patient is not None and len(X_patient) > 0:
         y_pred = model.predict(X_patient)
@@ -292,3 +306,5 @@ with tab2:
 
     st.subheader("3. Classification Report (Precision, Recall, F1-Score)")
     st.dataframe(pd.DataFrame(classification_report(y_test, y_test_pred, output_dict=True)).transpose().round(3), use_container_width=True)
+
+
