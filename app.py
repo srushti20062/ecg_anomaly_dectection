@@ -1,4 +1,4 @@
-﻿import io
+import io
 import wave
 import streamlit as st
 import wfdb
@@ -75,25 +75,23 @@ def extract_mitbih_features(record_id, max_samples=None):
     rec = wfdb.rdrecord(record_id, pn_dir='mitdb', sampto=max_samples)
     ann = wfdb.rdann(record_id, 'atr', pn_dir='mitdb', sampto=max_samples)
     cleaned_ecg = nk.ecg_clean(rec.p_signal[:, 0], sampling_rate=fs)
-
     valid_idx = [i for i, sym in enumerate(ann.symbol) if sym in BEAT_CLASSES]
-    r_peaks = ann.sample[valid_idx]
-    symbols = [ann.symbol[i] for i in valid_idx]
-
-    features, labels, valid_peaks = [], [], []
-    window = int(0.1 * fs)
-    for i in range(1, len(r_peaks) - 1):
-        pk = r_peaks[i]
-        if pk - window < 0 or pk + window >= len(cleaned_ecg):
-            continue
-        pre_rr = (r_peaks[i] - r_peaks[i - 1]) / fs
-        post_rr = (r_peaks[i + 1] - r_peaks[i]) / fs
-        beat_seg = cleaned_ecg[pk - window : pk + window]
-        features.append([pre_rr, post_rr, cleaned_ecg[pk], np.ptp(beat_seg), np.std(beat_seg)])
-        labels.append(BEAT_CLASSES[symbols[i]])
-        valid_peaks.append(pk)
-
-    return cleaned_ecg, fs, np.array(valid_peaks), np.array(features), np.array(labels)
+    if len(valid_idx) >= 4:
+        r_peaks = ann.sample[valid_idx]
+        symbols = [ann.symbol[i] for i in valid_idx]
+        features, labels, valid_peaks = [], [], []
+        window = int(0.1 * fs)
+        for i in range(1, len(r_peaks) - 1):
+            pk = r_peaks[i]
+            if pk - window < 0 or pk + window >= len(cleaned_ecg): continue
+            beat_seg = cleaned_ecg[pk - window : pk + window]
+            features.append([(r_peaks[i] - r_peaks[i - 1]) / fs, (r_peaks[i + 1] - r_peaks[i]) / fs, cleaned_ecg[pk], np.ptp(beat_seg), np.std(beat_seg)])
+            labels.append(BEAT_CLASSES[symbols[i]])
+            valid_peaks.append(pk)
+        return cleaned_ecg, fs, np.array(valid_peaks), np.array(features), np.array(labels)
+    else:
+        _, valid_peaks, features = analyze_custom_signal(rec.p_signal[:, 0], fs=fs)
+        return cleaned_ecg, fs, valid_peaks, features, None
 
 def analyze_custom_signal(raw_signal, fs=360):
     cleaned_ecg = nk.ecg_clean(raw_signal, sampling_rate=fs)
@@ -117,19 +115,27 @@ def analyze_custom_signal(raw_signal, fs=360):
 def digitize_ecg_image(uploaded_img, duration_sec=10, target_fs=360):
     img = Image.open(uploaded_img).convert("L")
     img_arr = np.array(img, dtype=float)
-    height, width = img_arr.shape
-    inverted = 255.0 - img_arr
+    h, w = img_arr.shape
+    if (h / float(w)) > 0.35:
+        roi = img_arr[int(h * 0.36):int(h * 0.62), int(w * 0.10):int(w * 0.95)]
+    else:
+        roi = img_arr[int(h * 0.02):int(h * 0.98), int(w * 0.01):int(w * 0.99)]
+    rh, rw = roi.shape
+    inverted = np.clip(np.percentile(roi, 92) - roi, 0, None)
     trace_y = []
-    for col in range(width):
+    for col in range(rw):
         col_vals = inverted[:, col]
-        mask = col_vals >= (0.75 * np.max(col_vals))
-        y_indices = np.where(mask)
-        trace_y.append(np.mean(y_indices) if len(y_indices) > 0 else height / 2.0)
+        mx = np.max(col_vals)
+        if mx > 15:
+            y_indices = np.where(col_vals >= 0.80 * mx)
+            trace_y.append(np.mean(y_indices))
+        else:
+            trace_y.append(trace_y[-1] if trace_y else rh / 2.0)
 
-    raw_wave = (height / 2.0) - np.array(trace_y)
-    raw_wave = (raw_wave - np.mean(raw_wave)) / (np.std(raw_wave) + 1e-6)
-    target_len = int(duration_sec * target_fs)
-    return np.interp(np.linspace(0, 1, target_len), np.linspace(0, 1, len(raw_wave)), raw_wave)
+    raw_wave = (rh / 2.0) - np.array(trace_y)
+    p98 = np.percentile(np.abs(raw_wave - np.median(raw_wave)), 98) + 1e-6
+    raw_wave = ((raw_wave - np.median(raw_wave)) / p98) * 1.05
+    return np.interp(np.linspace(0, 1, int(duration_sec * target_fs)), np.linspace(0, 1, len(raw_wave)), raw_wave)
 
 def get_precautions_and_guidance(avg_hr, y_pred):
     unique_abnormal = [b for b in np.unique(y_pred) if b != 'Normal Beat (N)']
@@ -138,7 +144,7 @@ def get_precautions_and_guidance(avg_hr, y_pred):
     elif avg_hr > 100:
         hr_status = "Tachycardia (Elevated Rate > 100 BPM)"
     else:
-        hr_status = "Normal Resting Heart Rate (60â€“100 BPM)"
+        hr_status = "Normal Resting Heart Rate (60-100 BPM)"
 
     precautions = []
     if len(unique_abnormal) == 0 and 60 <= avg_hr <= 100:
@@ -151,12 +157,12 @@ def get_precautions_and_guidance(avg_hr, y_pred):
         ]
     else:
         level = "warning"
-        detected_str = ", ".join(unique_abnormal) if unique_abnormal else "Heart Rate outside 60â€“100 BPM range"
+        detected_str = ", ".join(unique_abnormal) if unique_abnormal else "Heart Rate outside 60-100 BPM range"
         summary = f"Irregularities detected: **{detected_str}** | Rate Status: **{hr_status}**."
 
         if any("PVC" in b or "APB" in b for b in unique_abnormal):
             precautions.append("Limit stimulants such as caffeine, nicotine, energy drinks, and alcohol, which commonly trigger premature beats.")
-            precautions.append("Prioritize 7â€“8 hours of quality sleep and practice stress-reduction techniques.")
+            precautions.append("Prioritize 7-8 hours of quality sleep and practice stress-reduction techniques.")
         if any("Bundle Branch Block" in b for b in unique_abnormal):
             precautions.append("Schedule a 12-lead ECG and echocardiogram with a cardiologist to evaluate underlying conduction pathways.")
         if avg_hr > 100:
@@ -164,7 +170,7 @@ def get_precautions_and_guidance(avg_hr, y_pred):
         if avg_hr < 60:
             precautions.append("Monitor for dizziness, lightheadedness, or unusual fatigue, and review any rate-lowering medications with a doctor.")
 
-        precautions.append("Consult a qualified cardiologist or physician for formal clinical evaluationâ€”seek urgent medical care if accompanied by chest pain, shortness of breath, or fainting.")
+        precautions.append("Consult a qualified cardiologist or physician for formal clinical evaluation - ‚¬â€seek urgent medical care if accompanied by chest pain, shortness of breath, or fainting.")
 
     return level, hr_status, summary, precautions
 
@@ -248,28 +254,62 @@ with tab1:
         c3.metric("Abnormal Beats", f"{anomaly_count} beats")
         c4.metric("Classifier Accuracy", f"{model_acc * 100:.1f}%")
 
-        st.subheader("Cardiac Monitor Sound (Normal Beep vs Arrhythmia Alarm)")
-        st.audio(generate_ecg_audio(r_peaks, y_pred, len(cleaned_ecg), ecg_fs=fs), format="audio/wav")
-
-        time_axis = np.arange(len(cleaned_ecg)) / fs
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=time_axis, y=cleaned_ecg, mode='lines', name='Filtered ECG', line=dict(color='#1f77b4', width=1.5)))
-
-        for beat_type in np.unique(y_pred):
-            idx = np.where(y_pred == beat_type)
-            is_normal = (beat_type == 'Normal Beat (N)')
-            fig.add_trace(go.Scatter(
-                x=r_peaks[idx] / fs, y=cleaned_ecg[r_peaks[idx]], mode='markers', name=beat_type,
-                marker=dict(color=COLOR_MAP.get(beat_type, 'red'), size=8 if is_normal else 14, symbol='circle' if is_normal else 'diamond')
-            ))
-
-        fig.update_layout(xaxis_title="Time (seconds)", yaxis_title="Amplitude (mV)", height=450, hovermode="x unified")
-        st.plotly_chart(fig, use_container_width=True)
+        import json, base64
+        import streamlit.components.v1 as components
+        wav_b64 = base64.b64encode(generate_ecg_audio(r_peaks, y_pred, len(cleaned_ecg), ecg_fs=fs)).decode("utf-8")
+        step = max(1, len(cleaned_ecg) // 4000)
+        t_v = np.round(np.arange(0, len(cleaned_ecg), step) / fs, 4).tolist()
+        y_v = np.round(cleaned_ecg[::step], 4).tolist()
+        dur = round(len(cleaned_ecg) / fs, 3)
+        pks = [{"t": round(float(pk / fs), 4), "y": round(float(cleaned_ecg[pk]), 4), "lbl": lbl, "norm": bool(lbl == 'Normal Beat (N)'), "col": COLOR_MAP.get(lbl, '#ef4444')} for pk, lbl in zip(r_peaks, y_pred)]
+        components.html(f"""
+        <div style="background:#0f172a;border:1px solid #334155;border-radius:10px;padding:14px;font-family:sans-serif;color:#f8fafc;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+            <div>
+              <button id="pBtn" style="background:#2563eb;color:#fff;border:none;padding:8px 18px;border-radius:6px;font-weight:bold;cursor:pointer;">â–&#9654; Play</button>
+              <button id="rBtn" style="background:#334155;color:#fff;border:none;padding:8px 12px;border-radius:6px;margin-left:6px;cursor:pointer;">â†&#8634; Reset</button>
+              <span id="tTxt" style="margin-left:10px;font-family:monospace;color:#94a3b8;">0.00s / {dur:.2f}s</span>
+            </div>
+            <span id="badge" style="padding:5px 12px;border-radius:16px;font-size:13px;font-weight:bold;background:#1e293b;color:#94a3b8;">Click â–&#9654; Play to Start</span>
+          </div>
+          <canvas id="cv" style="width:100%;height:350px;display:block;background:#020617;border-radius:8px;"></canvas>
+          <audio id="aud" src="data:audio/wav;base64,{wav_b64}" preload="auto"></audio>
+        </div>
+        <script>
+          const tD={json.dumps(t_v)},yD={json.dumps(y_v)},pks={json.dumps(pks)},dur={dur};
+          const cv=document.getElementById("cv"),ctx=cv.getContext("2d"),aud=document.getElementById("aud");
+          const pBtn=document.getElementById("pBtn"),rBtn=document.getElementById("rBtn"),tTxt=document.getElementById("tTxt"),badge=document.getElementById("badge");
+          const yMin=Math.min(...yD)-0.15,yMax=Math.max(...yD)+0.2;
+          function fit(){{const r=cv.getBoundingClientRect();cv.width=r.width*devicePixelRatio;cv.height=r.height*devicePixelRatio;ctx.scale(devicePixelRatio,devicePixelRatio);}}
+          fit(); window.onresize=()=>{{fit();draw(aud.currentTime);}};
+          function draw(ct){{
+            const w=cv.getBoundingClientRect().width,h=cv.getBoundingClientRect().height,pL=40,pR=15,pT=15,pB=25,pW=w-pL-pR,pH=h-pT-pB;
+            ctx.clearRect(0,0,w,h); ctx.strokeStyle="#1e293b"; ctx.lineWidth=1;
+            for(let i=0;i<=4;i++){{let gy=pT+(pH*i)/4;ctx.beginPath();ctx.moveTo(pL,gy);ctx.lineTo(w-pR,gy);ctx.stroke();}}
+            ctx.strokeStyle=ct>0?"rgba(56,189,248,0.25)":"#38bdf8"; ctx.lineWidth=ct>0?1.3:1.8; ctx.beginPath();
+            for(let i=0;i<tD.length;i++){{let x=pL+(tD[i]/dur)*pW,y=pT+pH-((yD[i]-yMin)/(yMax-yMin))*pH;i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);}} ctx.stroke();
+            if(ct>0){{ctx.save();ctx.strokeStyle="#38bdf8";ctx.shadowColor="#0ea5e9";ctx.shadowBlur=10;ctx.lineWidth=4.2;ctx.beginPath();let s=false;
+              for(let i=0;i<tD.length;i++){{if(tD[i]>ct)break;let x=pL+(tD[i]/dur)*pW,y=pT+pH-((yD[i]-yMin)/(yMax-yMin))*pH;if(!s){{ctx.moveTo(x,y);s=true;}}else ctx.lineTo(x,y);}} ctx.stroke();ctx.restore();}}
+            let hitB=null;
+            for(const p of pks){{let px=pL+(p.t/dur)*pW,py=pT+pH-((p.y-yMin)/(yMax-yMin))*pH,hit=Math.abs(ct-p.t)<0.14&&ct>0;if(hit)hitB=p;
+              ctx.fillStyle=p.col;ctx.strokeStyle="#fff";ctx.lineWidth=hit?2.5:1;
+              if(p.norm){{ctx.beginPath();ctx.arc(px,py,hit?7.5:4.5,0,6.28);ctx.fill();if(hit)ctx.stroke();}}
+              else{{let r=hit?11:7;ctx.beginPath();ctx.moveTo(px,py-r);ctx.lineTo(px+r,py);ctx.lineTo(px,py+r);ctx.lineTo(px-r,py);ctx.closePath();ctx.fill();ctx.stroke();}}}}
+            let cx=pL+(Math.min(ct,dur)/dur)*pW;ctx.strokeStyle="#facc15";ctx.lineWidth=2.5;ctx.beginPath();ctx.moveTo(cx,pT);ctx.lineTo(cx,h-pB);ctx.stroke();
+            tTxt.textContent=ct.toFixed(2)+"s / "+dur.toFixed(2)+"s";
+            if(hitB){{badge.style.background=hitB.norm?"#14532d":"#7f1d1d";badge.style.color=hitB.norm?"#86efac":"#fca5a5";badge.textContent=hitB.norm?"â— Normal ("+hitB.t.toFixed(2)+"s)":"âš  ALARM: "+hitB.lbl;}}
+          }}
+          function loop(){{draw(aud.currentTime);if(!aud.paused&&!aud.ended)requestAnimationFrame(loop);else if(aud.ended)pBtn.textContent="â–&#9654; Play";}}
+          pBtn.onclick=()=>{{if(aud.paused){{if(aud.ended)aud.currentTime=0;aud.play();pBtn.textContent="&#9208; Pause";requestAnimationFrame(loop);}}else{{aud.pause();pBtn.textContent="â–&#9654; Play";}}}};
+          rBtn.onclick=()=>{{aud.pause();aud.currentTime=0;pBtn.textContent="â–&#9654; Play";badge.style.background="#1e293b";badge.style.color="#94a3b8";badge.textContent="Click â–&#9654; Play to Start";draw(0);}};
+          draw(0);
+        </script>
+        """, height=430)
 
         st.subheader("Precautions & Assessment Based on Result")
         level, hr_status, summary, precautions = get_precautions_and_guidance(avg_hr, y_pred)
         if level == "normal":
-            st.success(f"**Status:** {hr_status} â€” {summary}")
+            st.success(f"**Status:** {hr_status} Ã¢â‚¬â€ {summary}")
         else:
             st.warning(f"**Status:** {summary}")
         for item in precautions:
@@ -306,5 +346,3 @@ with tab2:
 
     st.subheader("3. Classification Report (Precision, Recall, F1-Score)")
     st.dataframe(pd.DataFrame(classification_report(y_test, y_test_pred, output_dict=True)).transpose().round(3), use_container_width=True)
-
-
